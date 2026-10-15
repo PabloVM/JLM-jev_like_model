@@ -4,17 +4,25 @@ from transformers import AutoTokenizer
 
 
 class JLMTokenizer:
-    def __init__(self, model_name="Qwen/Qwen3-0.6B"):
+    def __init__(
+        self, model_name="Qwen/Qwen3-0.6B", max_prompt_length=384, max_option_length=64
+    ):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-
+        self.max_prompt_length = max_prompt_length
+        self.max_option_length = max_option_length
         self.choice_begin_token = self.tokenizer.encode("<option>")
         self.choice_end_token = self.tokenizer.encode("</option>")
         self.answer_prompt_tokens = self.tokenizer.encode("Answer is:")
 
     def _create_input_tokens(self, prompt: str, choices: list[str]):
         """Converts the input and identifies the indices for each option and answer."""
-        prompt_tokens = self.tokenizer.encode(prompt)
-        choice_tokens = [self.tokenizer.encode(c) for c in choices]
+        prompt_tokens = self.tokenizer.encode(
+            prompt, truncation=True, max_length=self.max_prompt_length
+        )
+        choice_tokens = [
+            self.tokenizer.encode(c, truncation=True, max_length=self.max_option_length)
+            for c in choices
+        ]
 
         final_tokens = list(prompt_tokens)
         idxs = {"question_end_indx": len(final_tokens) - 1, "choices_end_indxs": []}
