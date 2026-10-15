@@ -37,7 +37,6 @@ class JLM(nn.Module):
         self.base_model = Qwen3Model.from_pretrained(
             model_name,
             torch_dtype=dtype,
-            device_map="auto",
         )
 
         self.head = BilinearDecisionHead(self.base_model.config.hidden_size)
@@ -62,17 +61,11 @@ class JLM(nn.Module):
             c_indices = choice_idx[i]
             a_index = answer_idx[i]
 
-            choice_embeds = hidden[i, c_indices].unsqueeze(
-                0
-            )  # (1, num_choices, hidden_size)
-            answer_embed = hidden[i, a_index].unsqueeze(0)  # (1, hidden_size)
+            choice_embeds = hidden[i, c_indices].unsqueeze(0)
+            answer_embed = hidden[i, a_index].unsqueeze(0)
 
-            head_device = next(self.head.parameters()).device
-            scores = self.head(
-                answer_embed.to(head_device), choice_embeds.to(head_device)
-            )
+            scores = self.head(answer_embed, choice_embeds)
             logits_list.append(scores.squeeze(0))
-
         return logits_list
 
     @torch.no_grad
