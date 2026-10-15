@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import Qwen3Model
 
 
@@ -68,3 +69,85 @@ class JLM(nn.Module):
             logits_list.append(scores.squeeze(0))
 
         return logits_list
+
+    @torch.no_grad
+    def predict(
+        self,
+        tokenizer,
+        question: str,
+        choices: list[str] | None = None,
+        state: str = "",
+        kind: str = "choice",
+    ) -> dict:
+        """
+        High-level method for inference the 3 main primitives of JEV models
+        """
+
+        self.eval()
+        device = next(self.parameters()).device
+
+        if kind == "noul":
+            choices = ["no", "yes"]
+        elif choices is None or len(choices) == 0:
+            raise ValueError(
+                f"For kind {kind} it is necessary to provide a list of choices."
+            )
+
+        encoded = tokenizer.encode_example(state, question, choices)
+
+        input_ids = (
+            torch.tensor(encoded["input_ids"], dtype=torch.long).unsqueeze(0).to(device)
+        )
+        position_ids = (
+            torch.tensor(encoded["position_ids"], dtype=torch.long)
+            .unsqueeze(0)
+            .to(device)
+        )
+        attention_mask = (
+            encoded["attention_mask"]
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .to(dtype=torch.float32)
+            .to(device)
+        )
+
+        logits_list = self.forward(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            choice_idx=[encoded["choices_end_indxs"]],
+            answer_idx=[encoded["answer_end_indx"]],
+        )
+
+        logits = logits_list[0]
+        probs = F.softmax(logits, dim=-1)
+
+        if kind == "noul":
+            p_yes = probs[1].item() if len(probs) > 1 else probs[0].item()
+            return {
+                "kind": "noul",
+                "noul": round(p_yes, 4),
+            }
+
+        elif kind == "score":
+            levels = torch.arange(
+                1, len(choices) + 1, device=device, dtype=torch.float32
+            )
+            expected_score = torch.sum(levels * probs).item()
+            return {
+                "kind": "score",
+                "score": round(expected_score, 2),
+                "probabilities": {
+                    choice: round(p.item(), 4) for choice, p in zip(choices, probs)
+                },
+            }
+
+        else:
+            best_idx = int(torch.argmax(probs).item())
+            return {
+                "kind": "choice",
+                "choice": choices[best_idx],
+                "probabilities": {
+                    choice: round(p.item(), 4) for choice, p in zip(choices, probs)
+                },
+            }
