@@ -49,6 +49,8 @@ class JLM(nn.Module):
         )
 
         hidden = output.last_hidden_state.float()
+        self.head.to(hidden.device)
+
         batch_size = hidden.shape[0]
 
         logits_list = []
