@@ -32,9 +32,11 @@ class JLM(nn.Module):
     def __init__(self, model_name="Qwen/Qwen3-0.6B") -> None:
         super().__init__()
 
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
         self.base_model = Qwen3Model.from_pretrained(
             model_name,
-            torch_dtype=torch.float32,
+            torch_dtype=dtype,
         )
 
         self.head = BilinearDecisionHead(self.base_model.config.hidden_size)
