@@ -106,11 +106,26 @@ class JLMDataset(Dataset):
         state = item.get("state", "")
         question = item["question"]
         choices = item["options"]
+        kind = item.get("kind", "choice")
+
+        if kind == "noul":
+            choices = ["no", "yes"]
+        else:
+            choices = item["options"]
+
         target_list = item["target"]
-        correct_index = target_list.index(1.0)
+
+        # One-Hot Encoding
+
+        if isinstance(target_list, list):
+            correct_index = target_list.index(max(target_list))
+        else:
+            correct_index = int(target_list)
 
         encoded = self.tokenizer.encode_example(state, question, choices)
         encoded["label"] = correct_index
+        encoded["kind"] = kind
+
         return encoded
 
 
