@@ -40,14 +40,15 @@ class JLM(nn.Module):
         self.head = BilinearDecisionHead(self.base_model.config.hidden_size)
 
     def forward(self, input_ids, position_ids, attention_mask, choice_idx, answer_idx):
-        output = self.base_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=None,
-            input_embeds=None,
-            use_cache=False,
-        )
+        with torch.no_grad():
+            output = self.base_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=None,
+                input_embeds=None,
+                use_cache=False,
+            )
 
         hidden = output.last_hidden_state.float()
         self.head.to(hidden.device)
