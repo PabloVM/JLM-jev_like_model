@@ -107,7 +107,7 @@ class JLMDataset(Dataset):
         question = item["question"]
         choices = item["options"]
         target_list = item["target"]
-        correct_index = target_list.index(1.0)
+        correct_index = target_list.index(1)
 
         encoded = self.tokenizer.encode_example(state, question, choices)
         encoded["label"] = correct_index
