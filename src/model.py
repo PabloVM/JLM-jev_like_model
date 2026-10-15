@@ -34,7 +34,6 @@ class JLM(nn.Module):
         self.base_model = Qwen3Model.from_pretrained(
             model_name,
             torch_dtype=torch.float32,
-            device_map="auto",
         )
 
         self.head = BilinearDecisionHead(self.base_model.config.hidden_size)
