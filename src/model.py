@@ -41,7 +41,15 @@ class JLM(nn.Module):
 
         self.head = BilinearDecisionHead(self.base_model.config.hidden_size)
 
-    def forward(self, input_ids, position_ids, attention_mask, choice_idx, answer_idx):
+    def forward(
+        self,
+        input_ids,
+        position_ids,
+        attention_mask,
+        choice_idx,
+        choice_mask,
+        answer_idx,
+    ):
         with torch.no_grad():
             output = self.base_model(
                 input_ids=input_ids,
@@ -55,20 +63,15 @@ class JLM(nn.Module):
         hidden = output.last_hidden_state.float()
         batch_size = hidden.shape[0]
 
-        logits_list = []
+        batch_indxs = torch.arange(batch_size, device=hidden.device)
+        answer_embed = hidden[batch_indxs, answer_idx]
+        choice_embeds = hidden[batch_indxs.unsqueeze(1), choice_idx]
 
-        for i in range(batch_size):
-            c_indices = choice_idx[i]
-            a_index = answer_idx[i]
+        scores = self.head(answer_embed, choice_embeds)
+        scores = scores.masked_fill(~choice_mask, -float("inf"))
+        return scores
 
-            choice_embeds = hidden[i, c_indices].unsqueeze(0)
-            answer_embed = hidden[i, a_index].unsqueeze(0)
-
-            scores = self.head(answer_embed, choice_embeds)
-            logits_list.append(scores.squeeze(0))
-        return logits_list
-
-    @torch.no_grad
+    @torch.no_grad()
     def predict(
         self,
         tokenizer,
@@ -80,7 +83,6 @@ class JLM(nn.Module):
         """
         High-level method for inference the 3 main primitives of JEV models
         """
-
         self.eval()
         device = next(self.parameters()).device
 
@@ -109,16 +111,28 @@ class JLM(nn.Module):
             .to(device)
         )
 
-        logits_list = self.forward(
+        num_choices = len(encoded["choices_end_indxs"])
+
+        choice_idx = (
+            torch.tensor(encoded["choices_end_indxs"], dtype=torch.long)
+            .unsqueeze(0)
+            .to(device)
+        )
+        choice_mask = torch.ones((1, num_choices), dtype=torch.bool).to(device)
+        answer_idx = torch.tensor([encoded["answer_end_indx"]], dtype=torch.long).to(
+            device
+        )
+
+        logits = self.forward(
             input_ids=input_ids,
             position_ids=position_ids,
             attention_mask=attention_mask,
-            choice_idx=[encoded["choices_end_indxs"]],
-            answer_idx=[encoded["answer_end_indx"]],
+            choice_idx=choice_idx,
+            choice_mask=choice_mask,
+            answer_idx=answer_idx,
         )
 
-        logits = logits_list[0]
-        probs = F.softmax(logits, dim=-1)
+        probs = F.softmax(logits[0], dim=-1)
 
         if kind == "noul":
             p_yes = probs[1].item() if len(probs) > 1 else probs[0].item()
