@@ -142,15 +142,17 @@ def jlm_collate_fn(batch):
     batch_size = len(batch)
 
     max_len = max(len(item["input_ids"]) for item in batch)
+    max_choices = max(len(item["choices_end_indxs"]) for item in batch)
 
     padded_input_ids = torch.zeros((batch_size, max_len), dtype=torch.long)
     padded_position_ids = torch.zeros((batch_size, max_len), dtype=torch.long)
 
     # (batch_size, 1, max_len, max_len)
     padded_attn_mask = torch.full((batch_size, 1, max_len, max_len), -float("inf"))
+    padded_choices_idx = torch.zeros((batch_size, max_choices), dtype=torch.long)
+    choice_mask = torch.zeros((batch_size, max_choices), dtype=torch.bool)
 
     labels = []
-    batch_choices_end_indxs = []
     batch_answer_end_indxs = []
 
     for i, item in enumerate(batch):
@@ -166,14 +168,18 @@ def jlm_collate_fn(batch):
         padded_attn_mask[i, 0, :seq_len, :seq_len] = item["attention_mask"]
 
         labels.append(item["label"])
-        batch_choices_end_indxs.append(item["choices_end_indxs"])
         batch_answer_end_indxs.append(item["answer_end_indx"])
+
+        num_choices = len(item["choices_end_indxs"])
+        padded_choices_idx[i, :num_choices] = torch.tensor(item["choice_end_indxs"])
+        choice_mask[i, :num_choices] = True
 
     return {
         "input_ids": padded_input_ids,
         "position_ids": padded_position_ids,
         "attention_mask": padded_attn_mask,
         "labels": torch.tensor(labels, dtype=torch.long),
-        "choices_end_indxs": batch_choices_end_indxs,
-        "answer_end_indxs": batch_answer_end_indxs,
+        "choices_end_indxs": padded_choices_idx,
+        "choice_mask": choice_mask,
+        "answer_end_indxs": torch.tensor(batch_answer_end_indxs, dtype=torch.long),
     }
