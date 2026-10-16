@@ -171,7 +171,7 @@ def jlm_collate_fn(batch):
         batch_answer_end_indxs.append(item["answer_end_indx"])
 
         num_choices = len(item["choices_end_indxs"])
-        padded_choices_idx[i, :num_choices] = torch.tensor(item["choice_end_indxs"])
+        padded_choices_idx[i, :num_choices] = torch.tensor(item["choices_end_indxs"])
         choice_mask[i, :num_choices] = True
 
     return {
