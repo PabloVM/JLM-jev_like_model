@@ -1,5 +1,7 @@
+import random
+
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from transformers import AutoTokenizer
 
 
@@ -13,12 +15,28 @@ class JLMTokenizer:
         self.choice_begin_token = self.tokenizer.encode("<option>")
         self.choice_end_token = self.tokenizer.encode("</option>")
         self.answer_prompt_tokens = self.tokenizer.encode("Answer is:")
+        self.newline_tokens = self.tokenizer.encode("\n")
 
-    def _create_input_tokens(self, prompt: str, choices: list[str]):
-        """Converts the input and identifies the indices for each option and answer."""
-        prompt_tokens = self.tokenizer.encode(
-            prompt, truncation=True, max_length=self.max_prompt_length
+    def _encode_prompt(self, state: str, question: str) -> list[int]:
+        """Encodes `state\nquestion`, truncating the state (never the question) so
+        the prompt fits in max_prompt_length."""
+        question_tokens = self.tokenizer.encode(
+            question, truncation=True, max_length=self.max_prompt_length
         )
+        state_budget = (
+            self.max_prompt_length - len(question_tokens) - len(self.newline_tokens)
+        )
+        if not state or state_budget <= 0:
+            return question_tokens
+
+        state_tokens = self.tokenizer.encode(
+            state, truncation=True, max_length=state_budget
+        )
+        return state_tokens + self.newline_tokens + question_tokens
+
+    def _create_input_tokens(self, state: str, question: str, choices: list[str]):
+        """Converts the input and identifies the indices for each option and answer."""
+        prompt_tokens = self._encode_prompt(state, question)
         choice_tokens = [
             self.tokenizer.encode(c, truncation=True, max_length=self.max_option_length)
             for c in choices
@@ -85,10 +103,14 @@ class JLMTokenizer:
         mask = torch.where(mask == 1.0, 0.0, -float("inf"))
         return mask  #  (dim, dim)
 
+    def sequence_length(self, state: str, question: str, choices: list[str]) -> int:
+        """Length of the encoded example, without building masks (for bucketing)."""
+        input_ids, _ = self._create_input_tokens(state, question, choices)
+        return len(input_ids)
+
     def encode_example(self, state: str, question: str, choices: list[str]):
 
-        prompt_text = f"{state}\n{question}" if state else question
-        input_ids, idxs = self._create_input_tokens(prompt_text, choices)
+        input_ids, idxs = self._create_input_tokens(state, question, choices)
         position_ids = self._generate_position_ids(idxs)
         attention_mask = self._get_attention_mask(idxs)
 
@@ -109,17 +131,25 @@ class JLMDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
+    @staticmethod
+    def _choices(item) -> list[str]:
+        return ["no", "yes"] if item.get("kind", "choice") == "noul" else item["options"]
+
+    def lengths(self) -> list[int]:
+        """Encoded length of every example, used to group batches by length."""
+        return [
+            self.tokenizer.sequence_length(
+                item.get("state") or "", item["question"], self._choices(item)
+            )
+            for item in self.dataset
+        ]
+
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        state = item.get("state", "")
+        state = item.get("state") or ""
         question = item["question"]
-        choices = item["options"]
         kind = item.get("kind", "choice")
-
-        if kind == "noul":
-            choices = ["no", "yes"]
-        else:
-            choices = item["options"]
+        choices = self._choices(item)
 
         target_list = item["target"]
 
@@ -166,6 +196,9 @@ def jlm_collate_fn(batch):
         )
 
         padded_attn_mask[i, 0, :seq_len, :seq_len] = item["attention_mask"]
+        # Padding rows attend to themselves so no row is fully -inf (avoids NaNs)
+        pad_idx = torch.arange(seq_len, max_len)
+        padded_attn_mask[i, 0, pad_idx, pad_idx] = 0.0
 
         labels.append(item["label"])
         batch_answer_end_indxs.append(item["answer_end_indx"])
@@ -183,3 +216,52 @@ def jlm_collate_fn(batch):
         "choice_mask": choice_mask,
         "answer_end_indxs": torch.tensor(batch_answer_end_indxs, dtype=torch.long),
     }
+
+
+class LengthGroupedBatchSampler(Sampler[list[int]]):
+    """Yields batches of examples with similar length to minimise padding.
+
+    With shuffle=True, indices are shuffled, split into groups of
+    batch_size * group_mult, sorted by length inside each group and the
+    resulting batches are shuffled. With shuffle=False batches follow the
+    global length order (longest first, so OOM shows up immediately).
+    """
+
+    def __init__(self, lengths, batch_size, shuffle=True, group_mult=50, seed=0):
+        self.lengths = list(lengths)
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.group_mult = group_mult
+        self.seed = seed
+        self.epoch = 0
+
+    def __len__(self):
+        return (len(self.lengths) + self.batch_size - 1) // self.batch_size
+
+    def _split(self, indices):
+        return [
+            indices[i : i + self.batch_size]
+            for i in range(0, len(indices), self.batch_size)
+        ]
+
+    def __iter__(self):
+        indices = list(range(len(self.lengths)))
+
+        if not self.shuffle:
+            indices.sort(key=lambda i: self.lengths[i], reverse=True)
+            yield from self._split(indices)
+            return
+
+        rng = random.Random(self.seed + self.epoch)
+        self.epoch += 1
+        rng.shuffle(indices)
+
+        group_size = self.batch_size * self.group_mult
+        batches = []
+        for g in range(0, len(indices), group_size):
+            group = sorted(
+                indices[g : g + group_size], key=lambda i: self.lengths[i], reverse=True
+            )
+            batches.extend(self._split(group))
+        rng.shuffle(batches)
+        yield from batches

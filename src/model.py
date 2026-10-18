@@ -28,18 +28,59 @@ class BilinearDecisionHead(nn.Module):
         return scores
 
 
+def default_backbone_dtype() -> torch.dtype:
+    """bf16 only on GPUs with native support (Ampere+). T4/P100 report bf16 as
+    supported through emulation, which is several times slower than fp16."""
+    if not torch.cuda.is_available():
+        return torch.float32
+    if torch.cuda.get_device_capability()[0] >= 8:
+        return torch.bfloat16
+    return torch.float16
+
+
 class JLM(nn.Module):
-    def __init__(self, model_name="Qwen/Qwen3-0.6B") -> None:
+    def __init__(self, model_name="Qwen/Qwen3-0.6B", dtype=None) -> None:
         super().__init__()
 
-        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        self.backbone_dtype = dtype or default_backbone_dtype()
 
         self.base_model = Qwen3Model.from_pretrained(
             model_name,
-            torch_dtype=dtype,
+            torch_dtype=self.backbone_dtype,
         )
+        self.base_model.requires_grad_(False)
 
         self.head = BilinearDecisionHead(self.base_model.config.hidden_size)
+
+    @torch.no_grad()
+    def encode(self, input_ids, position_ids, attention_mask, choice_idx, answer_idx):
+        """Runs the frozen backbone and returns the fp32 embeddings the head needs.
+
+        Returns answer_embed (batch_size, hidden_size) and
+        choice_embeds (batch_size, num_choices, hidden_size).
+        """
+        output = self.base_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask.to(self.backbone_dtype),
+            position_ids=position_ids,
+            past_key_values=None,
+            inputs_embeds=None,
+            use_cache=False,
+        )
+
+        hidden = output.last_hidden_state.float()
+        batch_size = hidden.shape[0]
+
+        batch_indxs = torch.arange(batch_size, device=hidden.device)
+        answer_embed = hidden[batch_indxs, answer_idx]
+        choice_embeds = hidden[batch_indxs.unsqueeze(1), choice_idx]
+        return answer_embed, choice_embeds
+
+    def score(self, answer_embed, choice_embeds, choice_mask):
+        """Applies the decision head in fp32, even inside an autocast region."""
+        with torch.autocast(device_type=answer_embed.device.type, enabled=False):
+            scores = self.head(answer_embed.float(), choice_embeds.float())
+        return scores.masked_fill(~choice_mask, -float("inf"))
 
     def forward(
         self,
@@ -50,26 +91,10 @@ class JLM(nn.Module):
         choice_mask,
         answer_idx,
     ):
-        with torch.no_grad():
-            output = self.base_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=None,
-                input_embeds=None,
-                use_cache=False,
-            )
-
-        hidden = output.last_hidden_state.float()
-        batch_size = hidden.shape[0]
-
-        batch_indxs = torch.arange(batch_size, device=hidden.device)
-        answer_embed = hidden[batch_indxs, answer_idx]
-        choice_embeds = hidden[batch_indxs.unsqueeze(1), choice_idx]
-
-        scores = self.head(answer_embed, choice_embeds)
-        scores = scores.masked_fill(~choice_mask, -float("inf"))
-        return scores
+        answer_embed, choice_embeds = self.encode(
+            input_ids, position_ids, attention_mask, choice_idx, answer_idx
+        )
+        return self.score(answer_embed, choice_embeds, choice_mask)
 
     @torch.no_grad()
     def predict(
@@ -107,7 +132,6 @@ class JLM(nn.Module):
             encoded["attention_mask"]
             .unsqueeze(0)
             .unsqueeze(0)
-            .to(dtype=torch.float32)
             .to(device)
         )
 
