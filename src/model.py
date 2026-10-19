@@ -1,31 +1,33 @@
 import torch
+import math
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import Qwen3Model
 
 
-class BilinearDecisionHead(nn.Module):
-    def __init__(self, hidden_size):
+class DecisionHead(nn.Module):
+    def __init__(self, hidden_size, proj_dim=256):
         super().__init__()
-        self.bilinear = nn.Bilinear(hidden_size, hidden_size, 1)
+        self.norm = nn.LayerNorm(hidden_size)
+        self.proj_answer = nn.Linear(hidden_size, proj_dim)
+        self.proj_choices = nn.Linear(hidden_size, proj_dim)
+        self.logit_scale = nn.Parameter(
+            torch.tensor(math.log(10.0))
+        )  # Learnable temperature
 
     def forward(self, answer_embedding, choice_embeddings):
         """
         answer_embedding: (batch_size, hidden_size)
         choice_embeddings: (batch_size, num_choices, hidden_size)
         """
-        _, num_choices, _ = choice_embeddings.shape
 
-        answer_expanded = answer_embedding.unsqueeze(1).expand(
-            -1, num_choices, -1
-        )  # (batch_size,hidden_size) -> (batch_size, num_choices, hidden_size)
+        a = F.normalize(self.proj_answer(self.norm(answer_embedding)), dim=1)
+        c = F.normalize(self.proj_choices(self.norm(choice_embeddings)))
 
-        scores = self.bilinear(
-            answer_expanded, choice_embeddings
-        )  # Output: (batch_size, num_choices,1)
-        scores = scores.squeeze(-1)  # (batch_size, num_choices)
+        cos = torch.bmm(c, a.unsqueeze(-1)).squeeze(-1)  # (B,N)
+        scale = self.logit_scale.exp().clamp(max=100)
 
-        return scores
+        return scale * cos
 
 
 def default_backbone_dtype() -> torch.dtype:
@@ -50,7 +52,7 @@ class JLM(nn.Module):
         )
         self.base_model.requires_grad_(False)
 
-        self.head = BilinearDecisionHead(self.base_model.config.hidden_size)
+        self.head = DecisionHead(self.base_model.config.hidden_size)
 
     @torch.no_grad()
     def encode(self, input_ids, position_ids, attention_mask, choice_idx, answer_idx):
@@ -128,12 +130,7 @@ class JLM(nn.Module):
             .unsqueeze(0)
             .to(device)
         )
-        attention_mask = (
-            encoded["attention_mask"]
-            .unsqueeze(0)
-            .unsqueeze(0)
-            .to(device)
-        )
+        attention_mask = encoded["attention_mask"].unsqueeze(0).unsqueeze(0).to(device)
 
         num_choices = len(encoded["choices_end_indxs"])
 
